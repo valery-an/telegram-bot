@@ -1,18 +1,18 @@
-import re
 import requests
 from decouple import config
 from typing import Iterable
 from loguru import logger
+from re import sub
 from telebot.types import InputMediaPhoto
-from database.users_db import get_info
+from database.users_db import get_user_info
 
 
 RAPIDAPI_KEY = config('rapidapi_key')
 
 
 @logger.catch
-def find_destination_id(destination: str) -> str:
-    """ Функция, которая находит id города """
+def find_destinations(destination: str) -> dict:
+    """ Функция, которая находит варианты направлений по введённому тексту """
 
     url = 'https://hotels4.p.rapidapi.com/locations/v2/search'
     querystring = {'query': destination, 'locale': 'ru_RU'}
@@ -20,13 +20,18 @@ def find_destination_id(destination: str) -> str:
         'x-rapidapi-host': 'hotels4.p.rapidapi.com',
         'x-rapidapi-key': RAPIDAPI_KEY
         }
+    destinations = dict()
     try:
         response = requests.request('GET', url, headers=headers, params=querystring, timeout=10)
-        destination_id = response.json()['suggestions'][0]['entities'][0]['destinationId']
-        return destination_id
-    except requests.exceptions.ReadTimeout:
-        logger.info(f"Time run out: can't find destination id for {destination}")
-        return '0'
+        suggestions = response.json()['suggestions'][0]['entities']
+        for element in suggestions:
+            caption = sub(r'[^А-Яа-яЁё,\s\-]', '', element['caption'])
+            destination_id = element['destinationId']
+            destinations[caption] = destination_id
+    except (requests.exceptions.ReadTimeout, IndexError) as exception:
+        logger.info(f"{exception}: can't find destinations for {destination}")
+    finally:
+        return destinations
 
 
 @logger.catch
@@ -42,7 +47,8 @@ def output_hotels(destination_id: str, page_number: str, hotels_number: str, che
     :param price_min: минимальная цена за проживание
     :param price_max: максимальная цена за проживание
     :param sort_order: порядок сортировки отелей
-    :return: словарь с данными отеля (id, название, рейтинг, адрес, расстояние до центра, цена)
+    :return: словарь с данными отеля (id, название, рейтинг, адрес, расстояние до центра, цена, ссылка на сайт)
+             или None в случае возникновения ошибки
     """
 
     url = 'https://hotels4.p.rapidapi.com/properties/list'
@@ -56,7 +62,7 @@ def output_hotels(destination_id: str, page_number: str, hotels_number: str, che
         'x-rapidapi-key': RAPIDAPI_KEY
         }
     try:
-        response = requests.request('GET', url, headers=headers, params=querystring, timeout=10)
+        response = requests.request('GET', url, headers=headers, params=querystring, timeout=15)
         hotels = response.json()['data']['body']['searchResults']['results'][:int(hotels_number)]
         for element in hotels:
             hotel = dict()
@@ -72,10 +78,11 @@ def output_hotels(destination_id: str, page_number: str, hotels_number: str, che
             price = element['ratePlan']['price']
             hotel['price_info'] = price.get('info', '')
             hotel['price'] = price.get('exactCurrent')
+            hotel['url'] = f"https://ru.hotels.com/ho{element['id']}"
             yield hotel
-    except requests.exceptions.ReadTimeout:
-        logger.info(f"Time run out: can't output hotels for city id {destination_id}")
-        return dict()
+    except (requests.exceptions.ReadTimeout, IndexError) as exception:
+        logger.info(f"{exception}: can't output hotels for city id {destination_id}")
+        return None
 
 
 @logger.catch
@@ -94,13 +101,13 @@ def output_photos(hotel_id: str, photos_number: str) -> Iterable[str]:
         'x-rapidapi-key': RAPIDAPI_KEY
         }
     try:
-        response = requests.request('GET', url, headers=headers, params=querystring, timeout=10)
+        response = requests.request('GET', url, headers=headers, params=querystring, timeout=15)
         photos = response.json()['hotelImages'][:int(photos_number)]
         for element in photos:
-            photo_url = re.sub(r'{size}', 'b', element['baseUrl'])
+            photo_url = sub(r'{size}', 'b', element['baseUrl'])
             yield photo_url
-    except requests.exceptions.ReadTimeout:
-        logger.info(f"Time run out: can't output photos for hotel id {hotel_id}")
+    except (requests.exceptions.ReadTimeout, IndexError) as exception:
+        logger.info(f"{exception}: can't output photos for hotel id {hotel_id}")
         return list()
 
 
@@ -108,12 +115,12 @@ def output_photos(hotel_id: str, photos_number: str) -> Iterable[str]:
 def output_lowprice_highprice(user_id: int) -> Iterable:
     """ Функция, которые выводит информацию об отелях и их фотографии для команд /lowprice и /highprice """
 
-    city_id = get_info(column='city_id', user_id=user_id)
-    hotels_amount = get_info(column='hotels_amount', user_id=user_id)
-    check_in = get_info(column='check_in', user_id=user_id)
-    check_out = get_info(column='check_out', user_id=user_id)
-    photos_amount = get_info(column='photos_amount', user_id=user_id)
-    command = get_info(column='command', user_id=user_id)
+    city_id = get_user_info(column='city_id', user_id=user_id)
+    hotels_amount = get_user_info(column='hotels_amount', user_id=user_id)
+    check_in = get_user_info(column='check_in', user_id=user_id)
+    check_out = get_user_info(column='check_out', user_id=user_id)
+    photos_amount = get_user_info(column='photos_amount', user_id=user_id)
+    command = get_user_info(column='command', user_id=user_id)
     if command == '/lowprice':
         sort_order = 'PRICE'
     else:
@@ -121,11 +128,14 @@ def output_lowprice_highprice(user_id: int) -> Iterable:
     hotels = output_hotels(destination_id=city_id, page_number='1', hotels_number=hotels_amount,
                            check_in=check_in, check_out=check_out,
                            price_min=None, price_max=None, sort_order=sort_order)
+    if hotels is None:
+        return None
     for index, hotel in enumerate(hotels, start=1):
         text = f"{index}) {hotel['hotel_name']}\nРейтинг: {hotel['rating']}\n" \
                f"Адрес: {hotel['country']}, {hotel['locality']}, {hotel['street']}, {hotel['postal_code']}\n" \
                f"Расстояние до центра: {hotel['downtown_distance']}\n" \
-               f"Цена {hotel['price_info']}: {hotel['price']} руб."
+               f"Цена {hotel['price_info']}: {hotel['price']} руб.\n" \
+               f"Ссылка: {hotel['url']}"
         photos = []
         if photos_amount != 'None':
             photos_url = output_photos(hotel_id=hotel['hotel_id'], photos_number=photos_amount)
@@ -138,15 +148,15 @@ def output_lowprice_highprice(user_id: int) -> Iterable:
 def output_bestdeal(user_id: int) -> Iterable:
     """ Функция, которые выводит информацию об отелях и их фотографии для команды /bestdeal """
 
-    city_id = get_info(column='city_id', user_id=user_id)
-    hotels_amount = get_info(column='hotels_amount', user_id=user_id)
-    check_in = get_info(column='check_in', user_id=user_id)
-    check_out = get_info(column='check_out', user_id=user_id)
-    price_min = get_info(column='price_min', user_id=user_id)
-    price_max = get_info(column='price_max', user_id=user_id)
-    distance_min = get_info(column='distance_min', user_id=user_id)
-    distance_max = get_info(column='distance_max', user_id=user_id)
-    photos_amount = get_info(column='photos_amount', user_id=user_id)
+    city_id = get_user_info(column='city_id', user_id=user_id)
+    hotels_amount = get_user_info(column='hotels_amount', user_id=user_id)
+    check_in = get_user_info(column='check_in', user_id=user_id)
+    check_out = get_user_info(column='check_out', user_id=user_id)
+    price_min = get_user_info(column='price_min', user_id=user_id)
+    price_max = get_user_info(column='price_max', user_id=user_id)
+    distance_min = get_user_info(column='distance_min', user_id=user_id)
+    distance_max = get_user_info(column='distance_max', user_id=user_id)
+    photos_amount = get_user_info(column='photos_amount', user_id=user_id)
     page_number = 1
     hotels_count = 0
     index = hotels_amount + 1
@@ -155,6 +165,8 @@ def output_bestdeal(user_id: int) -> Iterable:
         hotels = output_hotels(destination_id=city_id, page_number=str(page_number),
                                hotels_number=str(hotels_count), check_in=check_in, check_out=check_out,
                                price_min=price_min, price_max=price_max, sort_order='DISTANCE_FROM_LANDMARK')
+        if hotels is None:
+            return None
         for hotel in hotels:
             hotels_count -= 1
             if hotels_amount == 0:
@@ -168,7 +180,8 @@ def output_bestdeal(user_id: int) -> Iterable:
             text = f"{index - hotels_amount}) {hotel['hotel_name']}\nРейтинг: {hotel['rating']}\n" \
                    f"Адрес: {hotel['country']}, {hotel['locality']}, {hotel['street']}, {hotel['postal_code']}\n" \
                    f"Расстояние до центра: {hotel['downtown_distance']}\n" \
-                   f"Цена {hotel['price_info']}: {hotel['price']} руб."
+                   f"Цена {hotel['price_info']}: {hotel['price']} руб.\n" \
+                   f"Ссылка: {hotel['url']}"
             photos = []
             if photos_amount != 'None':
                 photos_url = output_photos(hotel_id=hotel['hotel_id'], photos_number=photos_amount)

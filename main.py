@@ -5,9 +5,11 @@ from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
 from datetime import date, datetime, timedelta
 from loguru import logger
 from decouple import config
+from re import fullmatch, sub
 
-from database.users_db import create_db, set_info, get_info
-from rapidapi import find_destination_id, output_lowprice_highprice, output_bestdeal
+from database.users_db import create_users_db, set_user_info, get_user_info
+from database.history_db import create_history_db, set_history_info, get_history_info, clear_history_db
+from rapidapi import find_destinations, output_lowprice_highprice, output_bestdeal
 
 
 logger.add('log.log', format='{time} {level} {message}', level='INFO')
@@ -43,90 +45,105 @@ def help_handler(message: types.Message) -> None:
 
 @logger.catch
 @bot.message_handler(commands=['lowprice', 'highprice', 'bestdeal'])
-def start(message: types.Message) -> None:
+def begin(message: types.Message) -> None:
     """ Функция, которая реагирует на команды /lowprice, /highprice, /bestdeal """
 
-    create_db(message.chat.id)
     logger.info(f'User {message.chat.id} used command {message.text}')
-    set_info(column='command', value=message.text, user_id=message.chat.id)
+    create_users_db(message.chat.id)
+    create_history_db(message.chat.id)
+    set_user_info(column='command', value=message.text, user_id=message.chat.id)
     bot.send_message(chat_id=message.chat.id, text='В какой город вы хотите поехать?')
     bot.register_next_step_handler(message=message, callback=get_city)
 
 
 @logger.catch
 def get_city(message: types.Message) -> None:
-    """ Функция, принимающая от пользователя название города, в котором необходимо осуществить поиск """
+    """
+    Функция, которая принимает от пользователя название города, в котором необходимо осуществить поиск
+    и создаёт варианты направлений на выбор
+    """
 
-    city = message.text.title()
-    set_info(column='city', value=city, user_id=message.chat.id)
-    city_id = find_destination_id(city)
-    if city_id == '0':
+    destination = message.text
+    suggestions = find_destinations(destination)
+    if len(suggestions) == 0:
         bot.send_message(chat_id=message.chat.id, text='Город не найден, попробуйте ещё раз')
         bot.register_next_step_handler(message=message, callback=get_city)
         return
-    set_info(column='city_id', value=city_id, user_id=message.chat.id)
-    logger.info(f'Columns city and city_id updated for user {message.chat.id}')
-    command = get_info(column='command', user_id=message.chat.id)
+    inline_keyboard = types.InlineKeyboardMarkup(row_width=1)
+    for city, destination_id in suggestions.items():
+        inline_button = types.InlineKeyboardButton(city, callback_data=destination_id)
+        inline_keyboard.add(inline_button)
+    inline_button = types.InlineKeyboardButton('Выбрать другой город', callback_data='123')
+    inline_keyboard.add(inline_button)
+    bot.send_message(chat_id=message.chat.id, text='Уточните название города:', reply_markup=inline_keyboard)
+
+
+@logger.catch
+@bot.callback_query_handler(func=lambda call: fullmatch(r'\d{3,}', call.data))
+def callback_city(cal: types.CallbackQuery) -> None:
+    """ Функция, принимающая id города, в котором необходимо осуществить поиск """
+
+    if cal.data == '123':
+        bot.send_message(chat_id=cal.message.chat.id, text='В какой город вы хотите поехать?')
+        bot.register_next_step_handler(message=cal.message, callback=get_city)
+        return
+    set_user_info(column='city_id', value=cal.data, user_id=cal.message.chat.id)
+    command = get_user_info(column='command', user_id=cal.message.chat.id)
     if command == '/lowprice' or command == '/highprice':
-        bot.send_message(chat_id=message.chat.id, text='Выберите дату заезда')
-        select_check_in(message)
+        new_message = bot.send_message(chat_id=cal.message.chat.id, text='Выберите дату заезда')
+        select_check_in(new_message)
     else:
-        bot.send_message(chat_id=message.chat.id, text='Введите диапазон цен за ночь (через пробел)\n'
-                                                       'например: 500 10000')
-        bot.register_next_step_handler(message=message, callback=get_price_range)
+        new_message = bot.send_message(chat_id=cal.message.chat.id,
+                                       text='Введите диапазон цен за ночь (через пробел)\nнапример: 500 10000')
+        bot.register_next_step_handler(message=new_message, callback=get_price_range)
 
 
 @logger.catch
 def get_price_range(message: types.Message) -> None:
     """ Функция, принимающая от пользователя диапазон цен для команды /bestdeal """
 
-    price_range = message.text.split()
-    if len(price_range) != 2:
+    if fullmatch(r'\d+\s\d+', message.text):
+        price_range = message.text.split()
+        price_min = price_range[0]
+        price_max = price_range[1]
+        if int(price_min) > int(price_max):
+            price_min, price_max = price_max, price_min
+        set_user_info(column='price_min', value=price_min, user_id=message.chat.id)
+        set_user_info(column='price_max', value=price_max, user_id=message.chat.id)
         bot.send_message(chat_id=message.chat.id,
-                         text='Диапазон введён некорректно\nВведите минимальную и максимальную цены через пробел')
+                         text='Введите максимальное расстояние, на котором отель находится от центра, '
+                              'или диапазон расстояний (через пробел)\n'
+                              'например: 2 10')
+        bot.register_next_step_handler(message=message, callback=get_distance_range)
+    else:
+        bot.send_message(chat_id=message.chat.id,
+                         text='Данные введены некорректно\nВведите минимальную и максимальную цены через пробел')
         bot.register_next_step_handler(message=message, callback=get_price_range)
-        return
-    price_min = price_range[0]
-    price_max = price_range[1]
-    if not price_min.isdigit() or not price_max.isdigit():
-        bot.send_message(chat_id=message.chat.id, text='Диапазон введён некорректно\nВведите данные цифрами')
-        bot.register_next_step_handler(message=message, callback=get_price_range)
-        return
-    if int(price_min.isdigit()) > int(price_max.isdigit()):
-        price_min, price_max = price_max, price_min
-    set_info(column='price_min', value=price_min, user_id=message.chat.id)
-    set_info(column='price_max', value=price_max, user_id=message.chat.id)
-    logger.info(f'Columns price_min and price_max updated for user {message.chat.id}')
-    bot.send_message(chat_id=message.chat.id,
-                     text='Введите диапазон расстояния, на котором отель находится от центра (через пробел)\n'
-                          'например: 2 10')
-    bot.register_next_step_handler(message=message, callback=get_distance_range)
 
 
 @logger.catch
 def get_distance_range(message: types.Message) -> None:
     """ Функция, принимающая от пользователя диапазон расстояния для команды /bestdeal """
 
-    distance_range = message.text.split()
-    if len(distance_range) != 2:
+    if fullmatch(r'\d+\s\d+', message.text):
+        distance_range = message.text.split()
+        distance_min = distance_range[0]
+        distance_max = distance_range[1]
+        if int(distance_min) > int(distance_max):
+            distance_min, distance_max = distance_max, distance_min
+        set_user_info(column='distance_min', value=distance_min, user_id=message.chat.id)
+        set_user_info(column='distance_max', value=distance_max, user_id=message.chat.id)
+        bot.send_message(chat_id=message.chat.id, text='Выберите дату заезда')
+        select_check_in(message)
+    elif fullmatch(r'[1-9]\d+', message.text):
+        set_user_info(column='distance_min', value=0, user_id=message.chat.id)
+        set_user_info(column='distance_max', value=message.text, user_id=message.chat.id)
+        bot.send_message(chat_id=message.chat.id, text='Выберите дату заезда')
+        select_check_in(message)
+    else:
         bot.send_message(chat_id=message.chat.id,
-                         text='Диапазон введён некорректно\n'
-                              'Введите минимальное и максимальное расстояния через пробел')
+                         text='Данные введены некорректно\nВведите расстояние цифрами')
         bot.register_next_step_handler(message=message, callback=get_distance_range)
-        return
-    distance_min = distance_range[0]
-    distance_max = distance_range[1]
-    if not distance_min.isdigit() or not distance_max.isdigit():
-        bot.send_message(chat_id=message.chat.id, text='Диапазон введён некорректно\nВведите данные цифрами')
-        bot.register_next_step_handler(message=message, callback=get_distance_range)
-        return
-    if int(distance_min.isdigit()) > int(distance_max.isdigit()):
-        distance_min, distance_max = distance_max, distance_min
-    set_info(column='distance_min', value=distance_min, user_id=message.chat.id)
-    set_info(column='distance_max', value=distance_max, user_id=message.chat.id)
-    logger.info(f'Columns distance_min and distance_max updated for user {message.chat.id}')
-    bot.send_message(chat_id=message.chat.id, text='Выберите дату заезда')
-    select_check_in(message)
 
 
 @logger.catch
@@ -141,25 +158,25 @@ def select_check_in(message: types.Message) -> None:
                      reply_markup=calendar)
 
 
+@logger.catch
 @bot.callback_query_handler(func=DetailedTelegramCalendar.func(calendar_id='in'))
-def cal(c: types.CallbackQuery) -> None:
+def callback_calendar(cal: types.CallbackQuery) -> None:
     """ Функция, которая обрабатывает данные календаря заезда """
 
     result, key, step = DetailedTelegramCalendar(
         calendar_id='in', locale='ru', min_date=date.today(), max_date=date(2022, 3, 31)
-    ).process(c.data)
+    ).process(cal.data)
     if not result and key:
         bot.edit_message_text(text=f'Select {LSTEP[step]}',
-                              chat_id=c.message.chat.id,
-                              message_id=c.message.message_id,
+                              chat_id=cal.message.chat.id,
+                              message_id=cal.message.message_id,
                               reply_markup=key)
     elif result:
-        bot.edit_message_text(text=f'Вы выбрали {result}',
-                              chat_id=c.message.chat.id,
-                              message_id=c.message.message_id)
-        set_info(column='check_in', value=result, user_id=c.message.chat.id)
-        logger.info(f'Column check_in updated for user {c.message.chat.id}')
-        new_message = bot.send_message(chat_id=c.message.chat.id, text='Выберите дату выезда')
+        bot.edit_message_text(text=f'Дата заезда: {result}',
+                              chat_id=cal.message.chat.id,
+                              message_id=cal.message.message_id)
+        set_user_info(column='check_in', value=result, user_id=cal.message.chat.id)
+        new_message = bot.send_message(chat_id=cal.message.chat.id, text='Выберите дату выезда')
         select_check_out(new_message)
 
 
@@ -167,7 +184,7 @@ def cal(c: types.CallbackQuery) -> None:
 def select_check_out(message: types.Message) -> None:
     """ Функция, которая создаёт календарь выезда """
 
-    check_in_date = get_info(column='check_in', user_id=message.chat.id)
+    check_in_date = get_user_info(column='check_in', user_id=message.chat.id)
     check_in_date_plus = datetime.strptime(check_in_date, '%Y-%m-%d').date() + timedelta(days=1)
     calendar, step = DetailedTelegramCalendar(
         calendar_id='out', locale='ru', min_date=check_in_date_plus, max_date=date(2022, 3, 31)
@@ -177,28 +194,35 @@ def select_check_out(message: types.Message) -> None:
                      reply_markup=calendar)
 
 
+@logger.catch
 @bot.callback_query_handler(func=DetailedTelegramCalendar.func(calendar_id='out'))
-def cal(c: types.CallbackQuery) -> None:
+def callback_calendar(cal: types.CallbackQuery) -> None:
     """ Функция, которая обрабатывает данные календаря выезда """
 
-    check_in_date = get_info(column='check_in', user_id=c.message.chat.id)
+    check_in_date = get_user_info(column='check_in', user_id=cal.message.chat.id)
     check_in_date_plus = datetime.strptime(check_in_date, '%Y-%m-%d').date() + timedelta(days=1)
     result, key, step = DetailedTelegramCalendar(
         calendar_id='out', locale='ru', min_date=check_in_date_plus, max_date=date(2022, 3, 31)
-    ).process(c.data)
+    ).process(cal.data)
     if not result and key:
         bot.edit_message_text(text=f'Select {LSTEP[step]}',
-                              chat_id=c.message.chat.id,
-                              message_id=c.message.message_id,
+                              chat_id=cal.message.chat.id,
+                              message_id=cal.message.message_id,
                               reply_markup=key)
     elif result:
-        bot.edit_message_text(text=f'Вы выбрали {result}',
-                              chat_id=c.message.chat.id,
-                              message_id=c.message.message_id)
-        set_info(column='check_out', value=result, user_id=c.message.chat.id)
-        logger.info(f'Column check_out updated for user {c.message.chat.id}')
-        new_message = bot.send_message(chat_id=c.message.chat.id,
-                                       text='Введите количество отелей, которые необходимо вывести (максимум 25)')
+        bot.edit_message_text(text=f'Дата выезда: {result}',
+                              chat_id=cal.message.chat.id,
+                              message_id=cal.message.message_id)
+        set_user_info(column='check_out', value=result, user_id=cal.message.chat.id)
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=5)
+        buttons = []
+        for digit in range(5, 26, 5):
+            button = types.KeyboardButton(str(digit))
+            buttons.append(button)
+        keyboard.add(*buttons)
+        new_message = bot.send_message(chat_id=cal.message.chat.id,
+                                       text='Выберите количество отелей, которые необходимо вывести',
+                                       reply_markup=keyboard)
         bot.register_next_step_handler(message=new_message, callback=get_hotels_amount)
 
 
@@ -208,18 +232,23 @@ def get_hotels_amount(message: types.Message) -> None:
 
     hotels_amount = message.text
     if not hotels_amount.isdigit():
-        new_message = bot.send_message(chat_id=message.chat.id,
-                                       text='Количество должно быть числом, введите ещё раз')
-        bot.register_next_step_handler(message=new_message, callback=get_hotels_amount)
+        bot.send_message(chat_id=message.chat.id,
+                         text='Количество должно быть числом, введите ещё раз')
+        bot.register_next_step_handler(message=message, callback=get_hotels_amount)
         return
     if int(hotels_amount) < 1 or int(hotels_amount) > 25:
         new_message = bot.send_message(chat_id=message.chat.id,
                                        text='Количество должно быть от 1 до 25, введите ещё раз')
         bot.register_next_step_handler(message=new_message, callback=get_hotels_amount)
         return
-    set_info(column='hotels_amount', value=hotels_amount, user_id=message.chat.id)
-    logger.info(f'Column hotels_amount updated for user {message.chat.id}')
-    bot.send_message(chat_id=message.chat.id, text='Показать фотографии отелей? (да/нет)')
+    set_user_info(column='hotels_amount', value=hotels_amount, user_id=message.chat.id)
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    button_1 = types.KeyboardButton('да')
+    button_2 = types.KeyboardButton('нет')
+    keyboard.row(button_1, button_2)
+    bot.send_message(chat_id=message.chat.id,
+                     text='Показать фотографии отелей?',
+                     reply_markup=keyboard)
     bot.register_next_step_handler(message=message, callback=have_photos)
 
 
@@ -228,16 +257,23 @@ def have_photos(message: types.Message) -> None:
     """ Функция, принимающая от пользователя согласие или отказ на вывод фотографий """
 
     if message.text.lower() == 'да':
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=5)
+        buttons = []
+        for digit in range(1, 11):
+            button = types.KeyboardButton(str(digit))
+            buttons.append(button)
+        keyboard.add(*buttons)
         bot.send_message(chat_id=message.chat.id,
-                         text='Введите количество фотографий для каждого отеля (максимум 10)')
+                         text='Выберите количество фотографий для каждого отеля',
+                         reply_markup=keyboard)
         bot.register_next_step_handler(message=message, callback=get_photos_amount)
     elif message.text.lower() == 'нет':
-        set_info(column='photos_amount', value='None', user_id=message.chat.id)
-        logger.info(f'Column photos_amount updated for user {message.chat.id}')
-        bot.send_message(chat_id=message.chat.id, text='Выполняется поиск...')
+        set_user_info(column='photos_amount', value='None', user_id=message.chat.id)
+        bot.send_message(chat_id=message.chat.id, text='Выполняется поиск...',
+                         reply_markup=types.ReplyKeyboardRemove())
         output_results(message)
     else:
-        new_message = bot.send_message(chat_id=message.chat.id, text='Я Вас не понимаю, да или нет?')
+        new_message = bot.send_message(chat_id=message.chat.id, text='Я вас не понимаю, да или нет?')
         bot.register_next_step_handler(message=new_message, callback=have_photos)
 
 
@@ -256,9 +292,9 @@ def get_photos_amount(message: types.Message) -> None:
                                        text='Количество должно быть от 1 до 10, введите ещё раз')
         bot.register_next_step_handler(message=new_message, callback=get_photos_amount)
         return
-    set_info(column='photos_amount', value=photos_amount, user_id=message.chat.id)
-    logger.info(f'Column photos_amount updated for user {message.chat.id}')
-    bot.send_message(chat_id=message.chat.id, text='Выполняется поиск...')
+    set_user_info(column='photos_amount', value=photos_amount, user_id=message.chat.id)
+    bot.send_message(chat_id=message.chat.id, text='Выполняется поиск...',
+                     reply_markup=types.ReplyKeyboardRemove())
     output_results(message)
 
 
@@ -266,21 +302,57 @@ def get_photos_amount(message: types.Message) -> None:
 def output_results(message: types.Message) -> None:
     """ Функция, которые выводит информацию об отелях и их фотографии """
 
-    command = get_info(column='command', user_id=message.chat.id)
+    command = get_user_info(column='command', user_id=message.chat.id)
+    text_for_history = ''
     if command == '/lowprice' or command == '/highprice':
         results = output_lowprice_highprice(message.chat.id)
     else:
         results = output_bestdeal(message.chat.id)
+    if results is None:
+        bot.send_message(chat_id=message.chat.id, text='Что-то пошло не так, попробуйте ещё раз')
+        help_handler(message)
+        logger.info(f'Command {command} for user {message.chat.id} NOT completed')
+        return
     for hotel_name, text, photos in results:
-        bot.send_message(chat_id=message.chat.id, text=text)
-        if len(photos) > 0:
-            try:
+        text_for_history += sub(r'Рейтинг.*\n.*\n.*\n', '', text) + '\n'
+        try:
+            bot.send_message(chat_id=message.chat.id, text=text, disable_web_page_preview=True)
+            if len(photos) > 0:
                 bot.send_media_group(chat_id=message.chat.id, media=photos)
-            except telebot.apihelper.ApiTelegramException:
-                logger.info(f"Can't output photos for {hotel_name}")
-                bot.send_message(chat_id=message.chat.id, text='Фотографии не найдены')
+        except telebot.apihelper.ApiTelegramException:
+            logger.info(f"Can't output photos or text for {hotel_name}")
     bot.send_message(chat_id=message.chat.id, text='Поиск завершён')
     logger.info(f'Command {command} for user {message.chat.id} completed')
+    if text_for_history != '':
+        set_history_info(command=command, date_time=datetime.now().replace(microsecond=0),
+                         hotels=text_for_history, user_id=message.chat.id)
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    button_1 = types.KeyboardButton('да')
+    button_2 = types.KeyboardButton('нет')
+    keyboard.row(button_1, button_2)
+    bot.send_message(chat_id=message.chat.id, text='Искать ещё?', reply_markup=keyboard)
+    bot.register_next_step_handler(message=message, callback=restart)
+
+
+@logger.catch
+def restart(message: types.Message) -> None:
+    bot.send_message(chat_id=message.chat.id, text='Хорошо', reply_markup=types.ReplyKeyboardRemove())
+    if message.text.lower() == 'да':
+        help_handler(message)
+
+
+@logger.catch
+@bot.message_handler(commands=['history'])
+def history_handler(message: types.Message) -> None:
+    """ Функция, выполняющая команду /history """
+
+    logger.info(f'User {message.chat.id} used command /history')
+    clear_history_db(message.chat.id)
+    data = get_history_info(message.chat.id)
+    for row in data:
+        bot.send_message(chat_id=message.chat.id,
+                         text=f'Команда: {row[0]}\nДата: {row[1]}\n{row[2]}',
+                         disable_web_page_preview=True)
 
 
 @logger.catch
@@ -289,8 +361,7 @@ def check_command(message: types.Message) -> None:
     """ Функция, вылавливающая неверные команды """
 
     logger.info(f'User {message.chat.id} input unknown command')
-    bot.send_message(chat_id=message.chat.id,
-                     text='Вы ввели неизвестную мне команду')
+    bot.send_message(chat_id=message.chat.id, text='Вы ввели неизвестную мне команду')
     help_handler(message)
 
 
