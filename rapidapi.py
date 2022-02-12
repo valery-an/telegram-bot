@@ -8,6 +8,7 @@ from database.users_db import get_user_info
 
 
 RAPIDAPI_KEY = config('rapidapi_key')
+headers = {'x-rapidapi-host': 'hotels4.p.rapidapi.com', 'x-rapidapi-key': RAPIDAPI_KEY}
 
 
 @logger.catch
@@ -16,10 +17,6 @@ def find_destinations(destination: str) -> dict:
 
     url = 'https://hotels4.p.rapidapi.com/locations/v2/search'
     querystring = {'query': destination, 'locale': 'ru_RU'}
-    headers = {
-        'x-rapidapi-host': 'hotels4.p.rapidapi.com',
-        'x-rapidapi-key': RAPIDAPI_KEY
-        }
     destinations = dict()
     try:
         response = requests.request('GET', url, headers=headers, params=querystring, timeout=10)
@@ -57,10 +54,6 @@ def output_hotels(destination_id: str, page_number: str, hotels_number: str, che
         'checkIn': check_in, 'checkOut': check_out, 'adults1': '1', 'priceMin': price_min, 'priceMax': price_max,
         'sortOrder': sort_order, 'locale': 'ru_RU', 'currency': 'RUB'
         }
-    headers = {
-        'x-rapidapi-host': 'hotels4.p.rapidapi.com',
-        'x-rapidapi-key': RAPIDAPI_KEY
-        }
     try:
         response = requests.request('GET', url, headers=headers, params=querystring, timeout=15)
         hotels = response.json()['data']['body']['searchResults']['results'][:int(hotels_number)]
@@ -96,10 +89,6 @@ def output_photos(hotel_id: str, photos_number: str) -> Iterable[str]:
 
     url = 'https://hotels4.p.rapidapi.com/properties/get-hotel-photos'
     querystring = {'id': hotel_id}
-    headers = {
-        'x-rapidapi-host': 'hotels4.p.rapidapi.com',
-        'x-rapidapi-key': RAPIDAPI_KEY
-        }
     try:
         response = requests.request('GET', url, headers=headers, params=querystring, timeout=15)
         photos = response.json()['hotelImages'][:int(photos_number)]
