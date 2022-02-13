@@ -135,7 +135,7 @@ def get_distance_range(message: types.Message) -> None:
         set_user_info(column='distance_max', value=distance_max, user_id=message.chat.id)
         bot.send_message(chat_id=message.chat.id, text='Выберите дату заезда')
         select_check_in(message)
-    elif fullmatch(r'[1-9]\d+', message.text):
+    elif fullmatch(r'[1-9]\d*', message.text):
         set_user_info(column='distance_min', value=0, user_id=message.chat.id)
         set_user_info(column='distance_max', value=message.text, user_id=message.chat.id)
         bot.send_message(chat_id=message.chat.id, text='Выберите дату заезда')
@@ -319,11 +319,12 @@ def output_results(message: types.Message) -> None:
             bot.send_message(chat_id=message.chat.id, text=text, disable_web_page_preview=True)
             if len(photos) > 0:
                 bot.send_media_group(chat_id=message.chat.id, media=photos)
-        except telebot.apihelper.ApiTelegramException:
-            logger.info(f"Can't output photos or text for {hotel_name}")
+        except telebot.apihelper.ApiTelegramException as exception:
+            logger.info(f"Can't output photos or text for {hotel_name}: {exception}")
     bot.send_message(chat_id=message.chat.id, text='Поиск завершён')
     logger.info(f'Command {command} for user {message.chat.id} completed')
     if text_for_history != '':
+        clear_history_db(message.chat.id)
         set_history_info(command=command, date_time=datetime.now().replace(microsecond=0),
                          hotels=text_for_history, user_id=message.chat.id)
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -347,7 +348,6 @@ def history_handler(message: types.Message) -> None:
     """ Функция, выполняющая команду /history """
 
     logger.info(f'User {message.chat.id} used command /history')
-    clear_history_db(message.chat.id)
     data = get_history_info(message.chat.id)
     for row in data:
         bot.send_message(chat_id=message.chat.id,

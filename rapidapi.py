@@ -22,11 +22,11 @@ def find_destinations(destination: str) -> dict:
         response = requests.request('GET', url, headers=headers, params=querystring, timeout=10)
         suggestions = response.json()['suggestions'][0]['entities']
         for element in suggestions:
-            caption = sub(r'[^А-Яа-яЁё,\s\-]', '', element['caption'])
+            caption = sub(r'<.*?>', '', element['caption'])
             destination_id = element['destinationId']
             destinations[caption] = destination_id
     except (requests.exceptions.ReadTimeout, IndexError) as exception:
-        logger.info(f"{exception}: can't find destinations for {destination}")
+        logger.info(f"Can't find destinations for {destination}: {exception}")
     finally:
         return destinations
 
@@ -74,7 +74,7 @@ def output_hotels(destination_id: str, page_number: str, hotels_number: str, che
             hotel['url'] = f"https://ru.hotels.com/ho{element['id']}"
             yield hotel
     except (requests.exceptions.ReadTimeout, IndexError) as exception:
-        logger.info(f"{exception}: can't output hotels for city id {destination_id}")
+        logger.info(f"Can't output hotels for city id {destination_id}: {exception}")
         return None
 
 
@@ -95,8 +95,8 @@ def output_photos(hotel_id: str, photos_number: str) -> Iterable[str]:
         for element in photos:
             photo_url = sub(r'{size}', 'b', element['baseUrl'])
             yield photo_url
-    except (requests.exceptions.ReadTimeout, IndexError) as exception:
-        logger.info(f"{exception}: can't output photos for hotel id {hotel_id}")
+    except (requests.exceptions.ReadTimeout, IndexError, KeyError) as exception:
+        logger.info(f"Can't output photos for hotel id {hotel_id}: {exception}")
         return list()
 
 
