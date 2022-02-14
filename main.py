@@ -349,10 +349,13 @@ def history_handler(message: types.Message) -> None:
 
     logger.info(f'User {message.chat.id} used command /history')
     data = get_history_info(message.chat.id)
-    for row in data:
-        bot.send_message(chat_id=message.chat.id,
-                         text=f'Команда: {row[0]}\nДата: {row[1]}\n{row[2]}',
-                         disable_web_page_preview=True)
+    if data:
+        for row in data:
+            bot.send_message(chat_id=message.chat.id,
+                             text=f'Команда: {row[0]}\nДата: {row[1]}\n{row[2]}',
+                             disable_web_page_preview=True)
+    else:
+        bot.send_message(chat_id=message.chat.id, text='История пока пуста')
 
 
 @logger.catch

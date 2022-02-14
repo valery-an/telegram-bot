@@ -38,14 +38,16 @@ def set_history_info(command: str, date_time: datetime, hotels: str, user_id: in
 
 
 @logger.catch
-def get_history_info(user_id: int) -> list:
+def get_history_info(user_id: int) -> list or None:
     """ Функция, которая возвращает данные пользователя из таблицы history """
 
     connect = sqlite3.connect('database/bot_database.db')
     cursor = connect.cursor()
-    cursor.execute(f"""SELECT * FROM history_{user_id}""")
-    data = cursor.fetchall()
-    return data
+    if (f'history_{user_id}', ) in cursor.execute("""SELECT name FROM sqlite_master WHERE type='table'""").fetchall():
+        data = cursor.execute(f"""SELECT * FROM history_{user_id}""").fetchall()
+        return data
+    else:
+        return None
 
 
 @logger.catch
